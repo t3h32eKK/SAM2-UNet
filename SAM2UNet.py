@@ -22,7 +22,7 @@ class DoubleConv(nn.Module):
 
     def forward(self, x):
         return self.double_conv(x)
-    
+
 
 class Up(nn.Module):
     """Upscaling then double conv"""
@@ -173,6 +173,11 @@ class SAM2UNet(nn.Module):
 
         x = self.up3(x, x1)
         out3 = self.out_conv3(x)
+
+        # Upsample to match target size (512x512)
+        out1 = F.interpolate(out1, size=(512, 512), mode='bilinear', align_corners=False)
+        out2 = F.interpolate(out2, size=(512, 512), mode='bilinear', align_corners=False)
+        out3 = F.interpolate(out3, size=(512, 512), mode='bilinear', align_corners=False)
 
         return out3, out2, out1
 
