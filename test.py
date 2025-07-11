@@ -42,8 +42,8 @@ for i in range(test_loader.size):
         res = (res * 255).astype(np.uint8)
         # If you want to binarize the prediction results, please uncomment the following three lines. 
         # Note that this action will affect the calculation of evaluation metrics.
-        lambda = 0.5
-        res[res >= int(255 * lambda)] = 255
-        res[res < int(255 * lambda)] = 0
+        # lambda = 0.5
+        # res[res >= int(255 * lambda)] = 255
+        # res[res < int(255 * lambda)] = 0
         print("Saving " + name)
         imageio.imsave(os.path.join(args.save_path, name[:-4] + ".png"), res)
