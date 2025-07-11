@@ -59,7 +59,7 @@ def main(args):
             loss0 = structure_loss(pred0, target)
             loss1 = structure_loss(pred1, target)
             loss2 = structure_loss(pred2, target)
-            loss = loss0 + loss1 + loss2
+            loss = loss0 + 0.23 * loss1 + 0.14 * loss2
             loss.backward()
             optim.step()
             if i % 50 == 0:
