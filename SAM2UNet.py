@@ -23,7 +23,7 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.double_conv(x)
     
-    
+
 class Up(nn.Module):
     """Upscaling then double conv"""
 
@@ -35,15 +35,11 @@ class Up(nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        # input is CHW
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
 
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
                         diffY // 2, diffY - diffY // 2])
-        # if you have padding issues, see
-        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
-        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
@@ -65,7 +61,7 @@ class Adapter(nn.Module):
         promped = x + prompt
         net = self.block(promped)
         return net
-    
+
 
 class BasicConv2d(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1):
@@ -80,7 +76,7 @@ class BasicConv2d(nn.Module):
         x = self.conv(x)
         x = self.bn(x)
         return x
-    
+
 
 class RFB_modified(nn.Module):
     def __init__(self, in_channel, out_channel):
@@ -123,7 +119,7 @@ class RFB_modified(nn.Module):
 
 class SAM2UNet(nn.Module):
     def __init__(self, checkpoint_path=None) -> None:
-        super(SAM2UNet, self).__init__()    
+        super(SAM2UNet, self).__init__()
         model_cfg = "sam2_hiera_l.yaml"
         if checkpoint_path:
             model = build_sam2(model_cfg, checkpoint_path)
@@ -146,36 +142,44 @@ class SAM2UNet(nn.Module):
             blocks.append(
                 Adapter(block)
             )
-        self.encoder.blocks = nn.Sequential(
-            *blocks
-        )
+        self.encoder.blocks = nn.Sequential(*blocks)
+
         self.rfb1 = RFB_modified(144, 64)
         self.rfb2 = RFB_modified(288, 64)
         self.rfb3 = RFB_modified(576, 64)
         self.rfb4 = RFB_modified(1152, 64)
-        self.up1 = (Up(128, 64))
-        self.up2 = (Up(128, 64))
-        self.up3 = (Up(128, 64))
-        self.up4 = (Up(128, 64))
-        self.side1 = nn.Conv2d(64, 1, kernel_size=1)
-        self.side2 = nn.Conv2d(64, 1, kernel_size=1)
-        self.head = nn.Conv2d(64, 1, kernel_size=1)
+
+        self.up1 = Up(128, 64)
+        self.up2 = Up(128, 64)
+        self.up3 = Up(128, 64)
+        self.up4 = Up(128, 64)
+
+        self.out_conv1 = nn.Conv2d(64, 1, kernel_size=1)
+        self.out_conv2 = nn.Conv2d(64, 1, kernel_size=1)
+        self.out_conv3 = nn.Conv2d(64, 1, kernel_size=1)
 
     def forward(self, x):
         x1, x2, x3, x4 = self.encoder(x)
-        x1, x2, x3, x4 = self.rfb1(x1), self.rfb2(x2), self.rfb3(x3), self.rfb4(x4)
+        x1 = self.rfb1(x1)
+        x2 = self.rfb2(x2)
+        x3 = self.rfb3(x3)
+        x4 = self.rfb4(x4)
+
         x = self.up1(x4, x3)
-        out1 = F.interpolate(self.side1(x), scale_factor=16, mode='bilinear')
+        out1 = self.out_conv1(x)
+
         x = self.up2(x, x2)
-        out2 = F.interpolate(self.side2(x), scale_factor=8, mode='bilinear')
+        out2 = self.out_conv2(x)
+
         x = self.up3(x, x1)
-        out = F.interpolate(self.head(x), scale_factor=4, mode='bilinear')
-        return out, out1, out2
+        out3 = self.out_conv3(x)
+
+        return out3, out2, out1
 
 
 if __name__ == "__main__":
     with torch.no_grad():
         model = SAM2UNet().cuda()
-        x = torch.randn(1, 3, 352, 352).cuda()
+        x = torch.randn(1, 3, 512, 512).cuda()
         out, out1, out2 = model(x)
         print(out.shape, out1.shape, out2.shape)
