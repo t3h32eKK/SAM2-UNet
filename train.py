@@ -1,87 +1,91 @@
-import os
-import argparse
-import random
-import numpy as np
-import torch
+#!/usr/bin/env python3
+import os, argparse, random, numpy as np, torch
 import torch.optim as opt
 import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from dataset import FullDataset
 from SAM2UNet import SAM2UNet
 
 
+# ───────────────────────────── Loss: Focal-Tversky ──────────────────────────
+class FocalTversky(nn.Module):
+    """Focal-Tversky loss: good for tiny, imbalanced structures."""
+    def __init__(self, α=0.3, β=0.7, γ=0.75, eps=1e-6):
+        super().__init__()
+        self.α, self.β, self.γ, self.eps = α, β, γ, eps
+
+    def forward(self, logits, target):
+        prob = torch.sigmoid(logits)
+        tp = (prob * target).sum((2, 3))
+        fp = (prob * (1 - target)).sum((2, 3))
+        fn = ((1 - prob) * target).sum((2, 3))
+        tv = (tp + self.eps) / (tp + self.α * fp + self.β * fn + self.eps)
+        return ((1 - tv) ** self.γ).mean()
+
+
+# ───────────────────────────── CLI args ─────────────────────────────────────
 parser = argparse.ArgumentParser("SAM2-UNet")
-parser.add_argument("--hiera_path", type=str, required=True, 
-                    help="path to the sam2 pretrained hiera")
-parser.add_argument("--train_image_path", type=str, required=True, 
-                    help="path to the image that used to train the model")
-parser.add_argument("--train_mask_path", type=str, required=True,
-                    help="path to the mask file for training")
-parser.add_argument('--save_path', type=str, required=True,
-                    help="path to store the checkpoint")
-parser.add_argument("--epoch", type=int, default=20, 
-                    help="training epochs")
-parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
-parser.add_argument("--batch_size", default=12, type=int)
-parser.add_argument("--weight_decay", default=5e-4, type=float)
+parser.add_argument("--hiera_path",        required=True)
+parser.add_argument("--train_image_path",  required=True)
+parser.add_argument("--train_mask_path",   required=True)
+parser.add_argument("--save_path",         required=True)
+parser.add_argument("--epoch", type=int,   default=40)
+parser.add_argument("--lr",    type=float, default=1e-4)
+parser.add_argument("--batch_size", type=int, default=8)
+parser.add_argument("--weight_decay", type=float, default=1e-4)
 args = parser.parse_args()
 
 
-def structure_loss(pred, mask):
-    weit = 1 + 5*torch.abs(F.avg_pool2d(mask, kernel_size=31, stride=1, padding=15) - mask)
-    wbce = F.binary_cross_entropy_with_logits(pred, mask, reduce='none')
-    wbce = (weit*wbce).sum(dim=(2, 3)) / weit.sum(dim=(2, 3))
-    pred = torch.sigmoid(pred)
-    inter = ((pred * mask)*weit).sum(dim=(2, 3))
-    union = ((pred + mask)*weit).sum(dim=(2, 3))
-    wiou = 1 - (inter + 1)/(union - inter+1)
-    return (wbce + wiou).mean()
+# ───────────────────────────── main train loop ──────────────────────────────
+def main(cfg):
+    # dataset @ 512²
+    ds = FullDataset(cfg.train_image_path, cfg.train_mask_path, 512, mode="train")
+    loader = DataLoader(ds, batch_size=cfg.batch_size,
+                        shuffle=True, num_workers=min(4, os.cpu_count()))
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def main(args):    
-    dataset = FullDataset(args.train_image_path, args.train_mask_path, 512, mode='train')
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=8)
-    device = torch.device("cuda")
-    model = SAM2UNet(args.hiera_path)
-    model.to(device)
-    optim = opt.AdamW([{"params":model.parameters(), "initia_lr": args.lr}], lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optim, args.epoch, eta_min=1.0e-7)
-    os.makedirs(args.save_path, exist_ok=True)
-    for epoch in range(args.epoch):
-        for i, batch in enumerate(dataloader):
-            x = batch['image']
-            target = batch['label']
-            x = x.to(device)
-            target = target.to(device)
-            optim.zero_grad()
-            pred0, pred1, pred2 = model(x)
-            loss0 = structure_loss(pred0, target)
-            loss1 = structure_loss(pred1, target)
-            loss2 = structure_loss(pred2, target)
-            loss = loss0
+    # SAM2-UNet with deep supervision
+    model = SAM2UNet(checkpoint_path=cfg.hiera_path, deep_sup=True).to(device)
+
+    loss_fn = FocalTversky()                      # ← new loss
+    opti    = opt.AdamW(model.parameters(),
+                        lr=cfg.lr, weight_decay=cfg.weight_decay)
+    sched   = CosineAnnealingLR(opti, cfg.epoch, eta_min=1e-6)
+
+    os.makedirs(cfg.save_path, exist_ok=True)
+
+    λ_main, λ_side2, λ_side1 = 1.0, 0.3, 0.1     # loss weights
+
+    for ep in range(cfg.epoch):
+        model.train()
+        for step, batch in enumerate(loader):
+            img   = batch["image"].to(device)
+            mask  = batch["label"].to(device)
+
+            opti.zero_grad()
+            pred, side2, side1 = model(img)
+
+            loss  = (λ_main  * loss_fn(pred,  mask)
+                   + λ_side2 * loss_fn(side2, mask)
+                   + λ_side1 * loss_fn(side1, mask))
             loss.backward()
-            optim.step()
-            if i % 50 == 0:
-                print("epoch:{}-{}: loss:{}".format(epoch + 1, i + 1, loss.item()))
-                
-        scheduler.step()
-        if (epoch+1) % 5 == 0 or (epoch+1) == args.epoch:
-            torch.save(model.state_dict(), os.path.join(args.save_path, 'SAM2-UNet-%d.pth' % (epoch + 1)))
-            print('[Saving Snapshot:]', os.path.join(args.save_path, 'SAM2-UNet-%d.pth'% (epoch + 1)))
+            opti.step()
 
+            if step % 50 == 0:
+                print(f"Epoch {ep+1}/{cfg.epoch}  iter {step:03d}  loss {loss.item():.4f}")
 
-# def seed_torch(seed=1024):
-# 	random.seed(seed)
-# 	os.environ['PYTHONHASHSEED'] = str(seed)
-# 	np.random.seed(seed)
-# 	torch.manual_seed(seed)
-# 	torch.cuda.manual_seed(seed)
-# 	torch.cuda.manual_seed_all(seed)
-# 	torch.backends.cudnn.benchmark = False
-# 	torch.backends.cudnn.deterministic = True
+        sched.step()
+
+        if (ep + 1) % 5 == 0 or (ep + 1) == cfg.epoch:
+            ckpt = os.path.join(cfg.save_path, f"SAM2-UNet-{ep+1}.pth")
+            torch.save(model.state_dict(), ckpt)
+            print("✔ saved", ckpt)
 
 
 if __name__ == "__main__":
-    # seed_torch(1024)
+    torch.manual_seed(0)
+    random.seed(0); np.random.seed(0)
     main(args)
