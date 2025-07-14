@@ -17,15 +17,11 @@ parser.add_argument("--save_path",      type=str, required=True,
                     help="directory to save predicted masks")
 args = parser.parse_args()
 
-# ────────────────────────── hardcoded SAM-2 trunk weights ─────────────────────────
-# Place your SAM-2 pretrained hiera .pt in the same folder or adjust this path
-HIERA_PATH = "sam2_hiera_large.pt"
+
 
 # ────────────────────────────── setup device & model ─────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# load SAM-2 trunk + U-Net decoder (no deep supervision at test)
-model = SAM2UNet(checkpoint_path=HIERA_PATH, deep_sup=False).to(device)
-# load your fine-tuned segmentation weights
+model = SAM2UNet().to(device)
 model.load_state_dict(torch.load(args.checkpoint), strict=True)
 model.eval()
 
